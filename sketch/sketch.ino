@@ -87,7 +87,7 @@ float analogResolution = 1 << ANALOG_RESOLUTION_BITS;
 float factor=(R1+R2)/R2/analogResolution;
 float factorGrey=(RGREY1+RGREY2)/RGREY2/analogResolution;
 
-
+float currentAngle;
 //ignore voltages lower then this
 #define MIN_MEASURE 0.5
 
@@ -178,7 +178,7 @@ float getWeight(float v){
   return v;
 }
 #define MAXVAL 0.99999
-float computeAngle(){
+float computeAngle(bool doAverage=true){
   float grey=(float)analogRead(GREY_PIN)*factorGrey;
   float windAngle=0;
   float scale=1.0;
@@ -229,6 +229,7 @@ float computeAngle(){
     wcos=-wcos;
   }
   float wfinal=(weighty *wsin+ weightg*wcos)/(weighty+weightg) + settings.currentValues.offset;
+  currentAngle=currentAngle + settings.currentValues.maf*(wfinal-currentAngle);
   if (settings.currentValues.showText || progMode){
     Serial.print(grey);
     Serial.print(", scale=");
@@ -251,9 +252,11 @@ float computeAngle(){
     Serial.print(wcos);
     Serial.print(", wfinal=");
     Serial.print(wfinal);
+    Serial.print(", angle=");
+    Serial.print(currentAngle);
     Serial.println();
   }
-  return wfinal;
+  return doAverage?currentAngle:wfinal;
 }
 
 static const PROGMEM char HELP[]="Help:\n"
@@ -291,7 +294,7 @@ void handleSerialLine(const char *receivedData) {
   if (! progMode) return;
   if (strcasecmp(tok,"ZERO") == 0){
       Serial.print("set as offset ");
-      float current=computeAngle();
+      float current=computeAngle(false);
       settings.currentValues.offset+=-current;
   }
   if (strcasecmp(tok,"CANCEL") == 0){
@@ -348,8 +351,14 @@ void handleSerialLine(const char *receivedData) {
   if (strcasecmp(tok,"AVERAGEFACTOR") == 0 ){
     char *val=strtok(NULL, DELIMITER);
     if (val){
-      settings.currentValues.maf=atof(val);
-      Serial.println("AVERAGEFACTOR");
+      float fac=atof(val);
+      if (fac < 0.1 || fac > 1){
+        Serial.println("FACTOR out of range 0.1...1");
+      }
+      else{
+        settings.currentValues.maf=fac;
+        Serial.println("AVERAGEFACTOR");
+      }
     }
   }
   if (strcasecmp(tok,"SHOWTEXT") == 0 ){
@@ -442,6 +451,7 @@ void setup() {
   currentCounterValue=0;
   maxCounterValue=0;
   addCount(lastCount,ts);
+  currentAngle=0;
 }
 void loop() {
   unsigned long currentTime=millis();

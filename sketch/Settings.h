@@ -20,7 +20,7 @@
 //see https://www.segeln-forum.de/board194-boot-technik/board35-elektrik-und-elektronik/board195-open-boat-projects-org/75527-reparaturhilfe-f%C3%BCr-vdo-windmessgeber/
 
 //moving average
-#define MAF 0.5
+#define MAF 0.8
 #define OFFSET(val,base) ((const char *)(&val)-(const char *)(&base)+sizeof(int))
 #define NUMVALUES 9
 class CurrentValues{
