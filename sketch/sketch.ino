@@ -4,20 +4,19 @@
  * License: MIT
  */
 #include "Settings.h"
+#define FH(x) (const __FlashStringHelper *)(x)
+#define PM(n,value) static const PROGMEM char n[]=value
 
+
+/*#define DEBUG*/
 #define IPIN 2
 //pins - grey: vref (~8V), green,yellow: direction
 #define GREY_PIN A2
 #define YELLOW_PIN A1
 #define GREEN_PIN  A0
-//used NMEA talker id
-#define TALKER_ID "GP"
 //NMEA output speed
 #define SPEED 19200
-//delay between 2 send outs
-#define INTERVAL 500
-//show debug info on the serial interface (should be no problem normally)
-#define SHOW_TEXT 1
+
 
 //resistors used to divide the input voltage
 //we assume similar ones for green and yellow
@@ -51,10 +50,32 @@ volatile unsigned long icount;
 unsigned long lastCount;
 unsigned long ts;
 unsigned long lastOutput;
+unsigned long lastInput;
 char nmeabuf[100];
+
+class TimeCount{
+  public:
+  unsigned long ts;
+  unsigned long count;
+  TimeCount(unsigned long count, unsigned long ts){
+    this->count=0;
+    this->ts=ts;
+  }
+  TimeCount(){
+    count=0;
+    ts=0;
+  }
+};
+
+//how many counters we store
+#define MAXCOUNT 10
+TimeCount counterValues[MAXCOUNT];
+int currentCounterValue;
+int maxCounterValue;
+
 #define MAXLINE 100
 char receive[MAXLINE+1];
-int receivedBytes=0;
+int receivedints=0;
 
 void isr(){
   icount++;
@@ -66,7 +87,6 @@ float analogResolution = 1 << ANALOG_RESOLUTION_BITS;
 float factor=(R1+R2)/R2/analogResolution;
 float factorGrey=(RGREY1+RGREY2)/RGREY2/analogResolution;
 
-bool progMode=true;
 
 //ignore voltages lower then this
 #define MIN_MEASURE 0.5
@@ -76,8 +96,16 @@ bool progMode=true;
 //this honors that values around 0 are more precise that at 1
 #define AVMAX 10
 
-
+//the amplitude of sin/cos
 float amp=1;
+
+#define PROG_DELAY      5000
+#define PROG_INTERVAL   1000
+//programming mode
+bool progMode;
+bool progOutput;
+bool minMaxMode;
+
 
 Settings settings;
 
@@ -88,19 +116,9 @@ float hzToKn(float hz){
 }
 
 
-void setup() {
-  icount=0;
-  lastCount=0;
-  attachInterrupt(digitalPinToInterrupt(IPIN),isr,RISING);
-  Serial.begin(SPEED);
-  ts=millis();
-  lastOutput=ts;
-  progMode=false;
-  settings.loadValues();
-  amp=(settings.currentValues.maxValue-settings.currentValues.minValue)/2;
-}
 
-byte toHex(byte c){
+
+int toHex(int c){
   c=c & 0xf;
   if (c <= 9) return '0'+c;
   else return 'A'+c-10;
@@ -111,9 +129,12 @@ const char * formatNmea(float windKn,float angle){
   char angles[10];
   dtostrf(windKn,1,1,speeds);
   dtostrf(angle,1,1,angles);
-  sprintf(nmeabuf,"$%sMWV,%s,R,%s,N,A",TALKER_ID,angles,speeds);
-  byte crc=0;
-  for (byte i=1;i<strlen(nmeabuf);i++){
+  sprintf(nmeabuf,"$%c%cMWV,%s,R,%s,N,A",
+    settings.currentValues.talker[0],
+    settings.currentValues.talker[1],
+    angles,speeds);
+  int crc=0;
+  for (int i=1;i<strlen(nmeabuf);i++){
     crc = crc ^ nmeabuf[i];
   }
   sprintf(nmeabuf+strlen(nmeabuf),"*%c%c",toHex(crc>>4),toHex(crc));
@@ -126,7 +147,7 @@ const char * formatNmea(float windKn,float angle){
 float handleMinMax(float v){
   bool hasChanged=false;
   if (v > settings.currentValues.maxValue){
-    if (! progMode ){
+    if (! minMaxMode ){
       v=settings.currentValues.maxValue;
     }
     else{
@@ -135,7 +156,7 @@ float handleMinMax(float v){
     }
   }
   if (v < settings.currentValues.minValue){
-    if (! progMode || v < MIN_MEASURE){
+    if (! minMaxMode || v < MIN_MEASURE){
       v=settings.currentValues.minValue;
     }
     else{
@@ -208,7 +229,7 @@ float computeAngle(){
     wcos=-wcos;
   }
   float wfinal=(weighty *wsin+ weightg*wcos)/(weighty+weightg) + settings.currentValues.offset;
-  if (SHOW_TEXT){
+  if (settings.currentValues.showText || progMode){
     Serial.print(grey);
     Serial.print(", scale=");
     Serial.print(scale);
@@ -232,40 +253,196 @@ float computeAngle(){
     Serial.print(wfinal);
     Serial.println();
   }
+  return wfinal;
 }
 
+static const PROGMEM char HELP[]="Help:\n"
+  "XXPROG             : start prog mode\n"
+  "    --- other only in prog mode ---\n"
+  "CANCEL             : leave prog mode\n"
+  "RELOAD             : reload settings\n"
+  "RESET              : load default settings\n"
+  "SAVE               : save settings\n"
+  "MINMAX             : start/stop min/max detection, slowly rotate vane\n"
+  "INTERVAL      ms   : set ouput interval\n"
+  "KNOTSPERHZ    fact : set the factor from hz to knots\n"
+  "MINPULSE      val  : average to get at least that many pulses (max 10 periods back)\n"
+  "AVERAGEFACTOR fact : set the moving average factor for angle\n"
+  "SHOWTEXT      0|1  : show debug output in normal mode\n"
+  "TALKER        XY   : set talker ID\n"
+  "OUTPUT             : toggle output in prog mode\n";
 
 void handleSerialLine(const char *receivedData) {
   char * tok = strtok(receivedData, DELIMITER);
-  if (! tok) return;
+  if (! tok) {
+    if (!progMode) return;
+    settings.printValues();
+    return;
+  }
   int num=0;
   if (strcasecmp(tok, "XXPROG") == 0) {
     progMode=true;
-    settings.currentValues.minValue=PROG_MIN;
-    settings.currentValues.maxValue=PROG_MAX;
+    minMaxMode=false;
+    progOutput=false;
     Serial.println("PROG started");
+    settings.printValues();
     return;
   }
-  if (strcasecmp(tok,"XX0") == 0){
-    if (progMode){
-      Serial.print("CURRENT ");
+  if (! progMode) return;
+  if (strcasecmp(tok,"ZERO") == 0){
+      Serial.print("set as offset ");
       float current=computeAngle();
-      settings.currentValues.offset=-current;
+      settings.currentValues.offset+=-current;
+  }
+  if (strcasecmp(tok,"CANCEL") == 0){
+    if (settings.isDirty()){
+      Serial.println("settings changed, use RELOAD before");
+    }
+    else{
+      progMode=false;
+      minMaxMode=false;
     }
   }
-  if (strcasecmp(tok,"XXRST") == 0){
+  if (strcasecmp(tok,"MINMAX") == 0){
+    Serial.print("MINMAX MODE=");
+    minMaxMode=!minMaxMode;
+    Serial.println(minMaxMode);
+    if (minMaxMode){
+      settings.currentValues.minValue=PROG_MIN;
+      settings.currentValues.maxValue=PROG_MAX;    
+    }
+  }
+  if (strcasecmp(tok,"RELOAD") == 0){
     Serial.println("RELOAD");
-    progMode=false;
     settings.reload();    
   }
-  if (strcasecmp(tok, "XXSAVE") == 0) {
+  if (strcasecmp(tok,"RESET") == 0){
+    Serial.println("RESET");
+    settings.reset(false);    
+  }
+  if (strcasecmp(tok, "SAVE") == 0) {
     Serial.println("SAVE");
     settings.write();
-    progMode=false;
-    return;
   }
+  if (strcasecmp(tok,"INTERVAL") == 0 ){
+    char *val=strtok(NULL, DELIMITER);
+    if (val){
+      settings.currentValues.interval=atoi(val);
+      Serial.println("INTERVAL");
+    }
+  }
+  if (strcasecmp(tok,"KNOTSPERHZ") == 0 ){
+    char *val=strtok(NULL, DELIMITER);
+    if (val){
+      settings.currentValues.hztokn=atof(val);
+      Serial.println("KNOTSPERHZ");
+    }
+  }
+  if (strcasecmp(tok,"MINPULSE") == 0 ){
+    char *val=strtok(NULL, DELIMITER);
+    if (val){
+      settings.currentValues.minCount=atoi(val);
+      Serial.println("MINPULSE");
+    }
+  }
+  if (strcasecmp(tok,"AVERAGEFACTOR") == 0 ){
+    char *val=strtok(NULL, DELIMITER);
+    if (val){
+      settings.currentValues.maf=atof(val);
+      Serial.println("AVERAGEFACTOR");
+    }
+  }
+  if (strcasecmp(tok,"SHOWTEXT") == 0 ){
+    char *val=strtok(NULL, DELIMITER);
+    if (val){
+      settings.currentValues.showText=atoi(val) != 0;
+      Serial.println("SHOWTEXT");
+    }
+  }
+  if (strcasecmp(tok,"TALKER") == 0 ){
+    char *val=strtok(NULL, DELIMITER);
+    if (val && strlen(val) >=2){
+      settings.currentValues.talker[0]=*val &0x5f;
+      settings.currentValues.talker[1]=*(val+1) & 0x5f;
+      Serial.println("TALKER");
+    }
+  }
+  if (strcasecmp(tok,"OUTPUT") == 0){
+    progOutput=!progOutput;
+    Serial.print("OUTPUT=");
+    Serial.println(progOutput);
+  }
+  if (strcasecmp(tok,"HELP") == 0 || strcasecmp(tok,"?") == 0){
+    Serial.print(FH(HELP));
+  }
+  settings.printValues();
 }
 
+void addCount(unsigned long count, unsigned long ts){
+#ifdef DEBUG
+    Serial.print("ADDC c=");
+    Serial.print(count);
+    Serial.print(", ts=");
+    Serial.println(ts);
+#endif    
+    counterValues[currentCounterValue].count=count;
+    counterValues[currentCounterValue].ts=ts;
+    currentCounterValue++;
+    if (currentCounterValue >= MAXCOUNT) currentCounterValue=0;
+    if (currentCounterValue > maxCounterValue) maxCounterValue++;
+}
+
+/**
+ * get a nicely averaged frequency
+ * we would like to have a minimal amount of pulses
+ * otherwise we go back in history and average over multiple periods
+ */
+float getAveragedHz(unsigned long minCount){
+    if (maxCounterValue < 2) return 0.0;
+    int numEntries=maxCounterValue;
+    int i=currentCounterValue-1;
+    if (i<0) i=MAXCOUNT-1;
+    unsigned long lastCount=counterValues[i].count;
+    unsigned long lastTs=counterValues[i].ts;    
+    int usedIndex=i;
+    while (numEntries >0){        
+        i--;
+        if (i<0) i=MAXCOUNT-1;
+        numEntries--;
+        usedIndex=i;
+        unsigned long diff=lastCount - counterValues[usedIndex].count;        
+#ifdef DEBUG
+        Serial.print("AVHZ diff=");
+        Serial.print(diff);
+        Serial.print(", idx=");
+        Serial.println(i);
+#endif        
+        if (diff >= minCount) break;
+    }
+    long counterDiff=lastCount-counterValues[usedIndex].count;
+    long timeDiff=lastTs-counterValues[usedIndex].ts;
+    if (counterDiff <0 || timeDiff <= 0) return 0.0;
+    return (float)counterDiff*1000.0/(float)timeDiff; 
+}
+
+
+void setup() {
+  icount=0;
+  lastCount=0;
+  attachInterrupt(digitalPinToInterrupt(IPIN),isr,RISING);
+  Serial.begin(SPEED);
+  ts=millis();
+  lastOutput=ts;
+  lastInput=ts;
+  progMode=false;
+  minMaxMode=false;
+  progOutput=false;
+  settings.loadValues();
+  amp=(settings.currentValues.maxValue-settings.currentValues.minValue)/2;
+  currentCounterValue=0;
+  maxCounterValue=0;
+  addCount(lastCount,ts);
+}
 void loop() {
   unsigned long currentTime=millis();
   if (currentTime <= ts){
@@ -277,35 +454,51 @@ void loop() {
   while (Serial.available() > 0) {
     int c = Serial.read();
     if (c < 0) break;
-    if (c < 0x20 || receivedBytes >= MAXLINE){
-      receive[receivedBytes]=0;
+    if (c < 0x20 || receivedints >= MAXLINE){
+      lastInput=ts;
+      receive[receivedints]=0;
       handleSerialLine(receive);
-      receivedBytes=0;
+      receivedints=0;
       break;
     }
-    receive[receivedBytes]=c;
-    receivedBytes++;
+    receive[receivedints]=c;
+    receivedints++;
   }
-  if ((currentTime-lastOutput) < INTERVAL){
-    return;
+  if (! progMode){
+    if ((currentTime-lastOutput) < settings.currentValues.interval){
+      delay(2);
+      return;
+    }
+  }
+  else{
+    if ((currentTime-lastInput) < PROG_DELAY){
+      delay(2);
+      return;
+    }
+    if ((currentTime - lastOutput) < PROG_INTERVAL || ! progOutput){
+      delay(2);
+      return;
+    }
   }
   lastOutput=currentTime;
-  unsigned long diff=currentTime-ts;
-  ts=currentTime;
   unsigned long currentCount=icount;
   if (currentCount < lastCount){
     //overflow - skip
     lastCount=currentCount;
     return;
   }
-  unsigned long countDiff=currentCount-lastCount;
+  addCount(currentCount,currentTime);
+  unsigned long diff=currentTime-ts;
+  ts=currentTime;
   lastCount=currentCount;
-  float freq=(float)countDiff*1000/(float)diff;
+  float freq=getAveragedHz(settings.currentValues.minCount);
   float windKn=hzToKn(freq);
-  if (SHOW_TEXT){
+  if (settings.currentValues.showText || progMode){
     if (progMode) Serial.print("[PROG] ");
     Serial.print("tdiff=");
     Serial.print(diff);
+    Serial.print(", count=");
+    Serial.print(currentCount);
     Serial.print(", freq=");
     Serial.print(freq);
     Serial.print(", kn=");
