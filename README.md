@@ -11,6 +11,7 @@ grau     | Referenz-Spannung
 weiss    | Geschwindigkeits-Puls
 gelb     | "sinus"
 grün     | "cosinus"
+blau     | Masse
 
 verbunden werden. 
 
@@ -37,4 +38,4 @@ __talker__ | die genutzte talker id für den NMEA output
 Im Programmier-Modus kann über __help__ eine Hilfe ausgegeben werden.
 
 Falls eine "richtige" NMEA0183 Verbindung aufgebaut werden soll, müssen an den Arduino noch Pegelwandler angeschlossen werden (für die serielle Schnittstelle). Ausserdem benötigt er eine Stromversorgung.
-Wenn aber ohnehin ein Anschluss per USB erfolgen soll (z.B. an einen Raspberry Pi) kann das direkt über die USB Schnisstelle des Arduino erfolgen.
+Wenn aber ohnehin ein Anschluss per USB erfolgen soll (z.B. an einen Raspberry Pi) kann das direkt über die USB Schnittstelle des Arduino erfolgen.
