@@ -142,6 +142,9 @@ const char * formatNmea(float windKn,float angle){
 }
 
 
+void computeAmplitude(){
+  amp=(settings.currentValues.maxValue-settings.currentValues.minValue)/2;
+}
 
 
 float handleMinMax(float v){
@@ -165,11 +168,10 @@ float handleMinMax(float v){
     }
   }
   if (hasChanged){
-    amp=(settings.currentValues.maxValue-settings.currentValues.minValue)/2;
+    computeAmplitude();
   }
   return v;
 }
-
 
 
 float getWeight(float v){
@@ -228,7 +230,17 @@ float computeAngle(bool doAverage=true){
   if (vyscaled <0 && vgscaled >=0){
     wcos=-wcos;
   }
+  float diffraw=wsin-wcos;
+  if ((wsin < -170 || wsin > 170) && (wcos < -170 || wcos > 170) && (diffraw < -180 || diffraw > 180)){
+    //sin is the better one in this area
+    wcos=-wcos;
+  }
   float wfinal=(weighty *wsin+ weightg*wcos)/(weighty+weightg) + settings.currentValues.offset;
+  float delta=wfinal-currentAngle;
+  if ((wfinal > 170 || wfinal < -170) && (currentAngle > 170 || currentAngle < -170) && (delta > 180 || delta < -180) ){
+    //special handling around +/-180
+    currentAngle=-currentAngle;
+  }
   currentAngle=currentAngle + settings.currentValues.maf*(wfinal-currentAngle);
   if (settings.currentValues.showText || progMode){
     Serial.print(grey);
@@ -256,7 +268,10 @@ float computeAngle(bool doAverage=true){
     Serial.print(currentAngle);
     Serial.println();
   }
-  return doAverage?currentAngle:wfinal;
+  float rt=doAverage?currentAngle:wfinal;
+  if (rt > 180) rt=-360+rt;
+  if (rt < -180) rt=360+rt;
+  return rt;
 }
 
 static const PROGMEM char HELP[]="Help:\n"
@@ -317,14 +332,19 @@ void handleSerialLine(const char *receivedData) {
   }
   if (strcasecmp(tok,"RELOAD") == 0){
     Serial.println("RELOAD");
-    settings.reload();    
+    minMaxMode=false;
+    settings.reload();
+    computeAmplitude();    
   }
   if (strcasecmp(tok,"RESET") == 0){
     Serial.println("RESET");
-    settings.reset(false);    
+    
+    settings.reset(false);
+    computeAmplitude();    
   }
   if (strcasecmp(tok, "SAVE") == 0) {
     Serial.println("SAVE");
+    minMaxMode=false;
     settings.write();
   }
   if (strcasecmp(tok,"INTERVAL") == 0 ){
@@ -485,7 +505,7 @@ void loop() {
       delay(2);
       return;
     }
-    if ((currentTime - lastOutput) < PROG_INTERVAL || ! progOutput){
+    if ((currentTime - lastOutput) < PROG_INTERVAL || ! (progOutput || minMaxMode)){
       delay(2);
       return;
     }
